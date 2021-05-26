@@ -106,6 +106,12 @@ class GMLVQ(LVQBaseClass):
         Flag to indicate whether to normalize omega, whenever it is updated, such that the trace of the relevance matrix
         is equal to 1.
 
+    relevance_fixed: bool, optional, default=False
+        Flag to indicate wheter to fix the relevance of certain features in omega during normalization.
+
+    relevance_fixed_value: tuple, default=(0,0)
+        The fixed values that will be used when relevance_fixed is True.
+
     relevance_n_components: str {"all"} or int, optional, default="all"
         For a square relevance matrix use the string "all" (default). For a rectangular relevance matrix use set the
         number of components explicitly by providing it as an int.
@@ -179,6 +185,8 @@ class GMLVQ(LVQBaseClass):
         prototype_n_per_class: Union[int, np.ndarray] = 1,
         relevance_init="identity",
         relevance_normalization: bool = True,
+        relevance_fixed: bool = False,
+        relevance_fixed_value: tuple = (0,0.5),
         relevance_n_components: Union[str, int] = "all",
         relevance_regularization: Union[int, float] = 0,
         random_state: Union[int, np.random.RandomState] = None,
@@ -190,6 +198,8 @@ class GMLVQ(LVQBaseClass):
         self.discriminant_params = discriminant_params
         self.relevance_init = relevance_init
         self.relevance_normalization = relevance_normalization
+        self.relevance_fixed = relevance_fixed
+        self.relevance_fixed_value = relevance_fixed_value
         self.relevance_n_components = relevance_n_components
         self.relevance_regularization = relevance_regularization
 
@@ -223,7 +233,10 @@ class GMLVQ(LVQBaseClass):
         """
         np.copyto(self._variables, new_variables)
         if self.relevance_normalization:
-            GMLVQ._normalise_omega(self.omega_)
+            if self.relevance_fixed:
+                GMLVQ._constrained_normalise_omega(self.omega_,self.relevance_fixed_value)
+            else:
+                GMLVQ._normalise_omega(self.omega_)
 
     def set_model_params(self, new_model_params: ModelParamsType):
         """
@@ -245,7 +258,10 @@ class GMLVQ(LVQBaseClass):
         self.set_omega(new_omega)
 
         if self.relevance_normalization:
-            GMLVQ._normalise_omega(self.omega_)
+            if self.relevance_fixed:
+                GMLVQ._constrained_normalise_omega(self.omega_,self.relevance_fixed_value)
+            else:
+                GMLVQ._normalise_omega(self.omega_)
 
     def get_model_params(self) -> ModelParamsType:
         """
@@ -366,7 +382,18 @@ class GMLVQ(LVQBaseClass):
 
     @staticmethod
     def _normalise_omega(omega: np.ndarray) -> None:
-        np.divide(omega, np.sqrt(np.einsum("ji, ji", omega, omega)), out=omega)
+        np.divide(omega, np.sqrt(np.einsum("ji, ji", omega, omega)), out=omega)           
+
+    @staticmethod
+    def _constrained_normalise_omega(omega: np.ndarray,relevance_fixed_value: tuple) -> None:
+        selector = [x for x in range(omega.shape[1]) if x != relevance_fixed_value[0]]
+        if relevance_fixed_value[1] == 0:
+            omega[:,relevance_fixed_value[0]] = 0
+            np.divide(omega, np.sqrt(np.einsum("ji, ji", omega, omega)), out=omega)           
+        else:
+            np.multiply(omega, np.sqrt((1-relevance_fixed_value[1])/np.einsum("ij, ij", omega[:,selector], omega[:,selector])), out=omega)
+            np.multiply(omega[:,relevance_fixed_value[0]], np.sqrt(relevance_fixed_value[1]/np.einsum("i, i", omega[:,relevance_fixed_value[0]], omega[:,relevance_fixed_value[0]])),out = omega[:,relevance_fixed_value[0]]) 
+
 
     ###########################################################################################
     # Solver helper functions
@@ -389,7 +416,6 @@ class GMLVQ(LVQBaseClass):
             The index of the prototype to which the partial gradient was  computed.
         """
         n_features = self.n_features_in_
-
         prots_view = self.to_prototypes_view(gradient)
         np.add(
             prots_view[i_prototype, :],
@@ -468,6 +494,26 @@ class GMLVQ(LVQBaseClass):
         else:
             raise ValueError("Provided n_components is invalid.")
 
+        if not isinstance(self.relevance_fixed,bool):
+            raise ValueError("Provided fixed relevance flag is invalid.")
+        else:
+            if(self.relevance_fixed):
+                if not isinstance(self.relevance_fixed_value,tuple):
+                    raise ValueError("provided fixed relevance value is invalid")
+                else:
+                    if not isinstance(self.relevance_fixed_value[0],int):
+                        raise ValueError("provided fixed relevance feature index is invalid")
+                    else:
+                        if (self.relevance_fixed_value[0] < 0 or self.relevance_fixed_value[0] >= self.n_features_in_):
+                            raise ValueError("provided fixed relevance feature index is outside of bounds")
+                    if not isinstance(self.relevance_fixed_value[1],float):
+                        raise ValueError("provided fixed relevance feature weight is invalid")
+                    else:
+                        if (self.relevance_fixed_value[1] < 0 or self.relevance_fixed_value[1] >= 1):
+                            raise ValueError("provided fixed relevance feature weight is outside of bounds")
+
+
+
         self._relevances_size = np.prod(self._relevances_shape)
 
     def _init_relevances(self):
@@ -488,7 +534,10 @@ class GMLVQ(LVQBaseClass):
             raise ValueError("Provided relevance_init is invalid.")
 
         if self.relevance_normalization:
-            GMLVQ._normalise_omega(self.omega_)
+            if self.relevance_fixed:
+                GMLVQ._constrained_normalise_omega(self.omega_,self.relevance_fixed_value)
+            else:
+                GMLVQ._normalise_omega(self.omega_)
 
     def _init_objective(self):
         self._objective = GeneralizedLearningObjective(
@@ -504,7 +553,7 @@ class GMLVQ(LVQBaseClass):
 
     def _after_fit(self, X: np.ndarray, y: np.ndarray):
         self.lambda_ = GMLVQ._compute_lambda(self.omega_)
-
+        
         # Eigenvalues and column eigenvectors return in ascending order
         eigenvalues, omega_hat = np.linalg.eigh(self.lambda_)
 
